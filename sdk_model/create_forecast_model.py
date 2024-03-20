@@ -378,17 +378,40 @@ class RebeccaCustomModel:
 
         return {'MSE': mse, 'MAE': mae, 'R2': r2}
 
-    def predict(self, df_in: pd.DataFrame, flag_all=False) -> pd.Series:
-        df_predict = self.inner_predict(df_in)
+    def predict(self, df_in: pd.DataFrame, horizont: int = None, output_all: bool =False) -> pd.Series:
+        if output_all:
+            df_in = self.inner_predict(df_in)
+            return df_in
 
-        if flag_all:
-            return df_predict
+        # AR
+        if (horizont is not None) and (len(df_in.columns) == 1) and (self.target_variable in df_in.columns):
+            df_in = df_in[df_in[self.target_variable].notnull()]
+            time_step = df_in.index.values[-1] - df_in.index.values[-2]
 
-        #### predict the desired horizont
-        #
-        y_pred = []
+            df_tmp = pd.DataFrame()
+            df_tmp[self.target_variable] = [np.nan for el in range(horizont)]
+            df_tmp.index = (np.arange(horizont)+1)*time_step + df_in.index.values[-1]
 
-        return y_pred
+            df_in = pd.concat([df_in, df_tmp])
+
+        # ds_y_real = df_in.loc[df_in[self.target_variable].notnull(), [self.target_variable]]#.sort_index()
+        ds_y_real_null = df_in.loc[df_in[self.target_variable].isnull(), [self.target_variable]]
+
+        if horizont is not None:
+            horizont = min(horizont, len(ds_y_real_null))
+        else:
+            horizont = len(ds_y_real_null)
+
+        for _ in range(horizont):
+            df_in = self.inner_predict(df_in)
+            df_in['y_pred_lag'] = df_in['y_predicted'].shift(1)
+
+            mask_substitute = df_in[self.target_variable].isnull() & df_in['y_pred_lag'].notnull()
+            df_in.loc[mask_substitute, self.target_variable] = df_in.loc[mask_substitute, 'y_pred_lag']
+
+            df_in.drop(columns=['y_predicted', 'y_pred_lag'], inplace=True)
+
+        return df_in[df_in.index.isin(ds_y_real_null.index)][self.target_variable]
 
 
 def create_features(df, fe_dict, fe_time_dict):
@@ -401,7 +424,7 @@ def create_features(df, fe_dict, fe_time_dict):
     return df_result
 
 
-def create_model(df, fe_dict, fe_time_dict, model_training, dir_save_model, file_name):
+def create_model(df, fe_dict, fe_time_dict, model_training, dir_save_model, file_name, return_model = False):
     # df.to_csv('tmp.csv', index=True, sep=';')
     # print(f"{fe_dict=}")
     # print(f"{fe_time_dict=}")
@@ -428,14 +451,20 @@ def create_model(df, fe_dict, fe_time_dict, model_training, dir_save_model, file
     print(df_train.shape)
     print(df_test.shape)
     forecast_model.fit(df_train)
-    df_train_with_prediction = forecast_model.predict(df_train, flag_all=True)
-    df_test_with_prediction = forecast_model.predict(df_test, flag_all=True)
+
+    if return_model:
+        return forecast_model
+
+    df_train_with_prediction = forecast_model.predict(df_train, output_all=True)
+    df_test_with_prediction = forecast_model.predict(df_test, output_all=True)
+
 
     with open(os.path.join(dir_save_model, file_name), 'wb') as handle:
         cloudpickle.dump(forecast_model, handle)
 
     df_train_with_prediction = df_train_with_prediction[df_train_with_prediction['y_predicted'].isnull()==False]
     df_test_with_prediction = df_test_with_prediction[df_test_with_prediction['y_predicted'].isnull()==False]
+
     return df_train_with_prediction[col_target], df_train_with_prediction['y_predicted'], \
         df_test_with_prediction[col_target], df_test_with_prediction['y_predicted']
 
